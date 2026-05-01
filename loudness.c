@@ -129,6 +129,22 @@ static void high_shelf_set(struct biquad *f, float rate, float freq, float gain_
     f->a2 =           ((A+1) - (A-1)*cw0 - sqA2) / a0;
 }
 
+static void peaking_set(struct biquad *f, float rate, float freq, float gain_db, float Q)
+{
+    float A     = powf(10.0f, gain_db / 40.0f);
+    float w0    = 2.0f * (float)M_PI * freq / rate;
+    float sw0   = sinf(w0);
+    float cw0   = cosf(w0);
+    float alpha = sw0 / (2.0f * Q);
+    float a0    = 1.0f + alpha / A;
+
+    f->b0 = (1.0f + alpha * A) / a0;
+    f->b1 = -2.0f * cw0 / a0;
+    f->b2 = (1.0f - alpha * A) / a0;
+    f->a1 = -2.0f * cw0 / a0;
+    f->a2 = (1.0f - alpha / A) / a0;
+}
+
 // -----------------------------------------------------------------------------
 // State
 // -----------------------------------------------------------------------------
@@ -155,6 +171,10 @@ struct data {
     // FM EQ
     struct biquad bass_shelf;
     struct biquad treble_shelf;
+
+    // Sidechain Sensitivity Tweaks (400Hz and 1kHz)
+    struct biquad sc_mid1;
+    struct biquad sc_mid2;
 
     // K-Weighting Detection Filters
     struct biquad k_stage1;
@@ -227,6 +247,11 @@ static void on_process(void *userdata, struct spa_io_position *position)
     if (rate != last_rate) {
         k_weight_stage1_set(&d->k_stage1, rate);
         k_weight_stage2_set(&d->k_stage2, rate);
+        
+        // Make the "brain" 6dB more sensitive to the problematic mids
+        peaking_set(&d->sc_mid1, rate, 400.0f,  6.0f, 1.0f);
+        peaking_set(&d->sc_mid2, rate, 1000.0f, 6.0f, 1.0f);
+
         d->delay_samples = (uint32_t)(rate * LOOKAHEAD_MS / 1000.0f);
         if (d->delay_samples >= DELAY_BUF_SIZE) d->delay_samples = DELAY_BUF_SIZE - 1;
 
@@ -263,6 +288,12 @@ static void on_process(void *userdata, struct spa_io_position *position)
         wl = biquad_tick(&d->k_stage2, wl, 0);
         float wr = biquad_tick(&d->k_stage1, in_r, 1);
         wr = biquad_tick(&d->k_stage2, wr, 1);
+
+        // Targeted sidechain sensitivity for 400Hz and 1kHz
+        wl = biquad_tick(&d->sc_mid1, wl, 0);
+        wl = biquad_tick(&d->sc_mid2, wl, 0);
+        wr = biquad_tick(&d->sc_mid1, wr, 1);
+        wr = biquad_tick(&d->sc_mid2, wr, 1);
 
         // Amplitude for RMS and Peak
         float abs_samp = fmaxf(fabsf(wl), fabsf(wr));
