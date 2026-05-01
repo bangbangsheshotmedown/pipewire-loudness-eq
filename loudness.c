@@ -37,11 +37,11 @@
 #define LIMITER_RELEASE_MS 500.0f
 
 // Fletcher-Munson shelf EQ settings (Subtler to prevent "heaviness")
-#define FM_BASS_FREQ     100.0f   // Focus on sub-bass
+#define FM_BASS_FREQ     80.0f    // Focus on sub-bass
 #define FM_TREBLE_FREQ   7500.0f  // Focus on clarity
-#define FM_BASS_MAX_DB   6.0f     // Reduced from 10dB
+#define FM_BASS_MAX_DB   3.0f     // Reduced from 6dB to prevent boominess
 #define FM_TREBLE_MAX_DB 5.0f
-#define FM_SHELF_SLOPE   0.8f     // Gentler slope
+#define FM_SHELF_SLOPE   0.6f     // Gentler slope
 
 // -----------------------------------------------------------------------------
 // Biquad — Direct Form II Transposed, stereo state
@@ -80,8 +80,8 @@ static void k_weight_stage1_set(struct biquad *f, float rate) {
 }
 
 static void k_weight_stage2_set(struct biquad *f, float rate) {
-    // Stage 2: High-pass at 50Hz (Lowered from 100Hz to see "heavy" bass)
-    float freq = 50.0f;
+    // Stage 2: High-pass at 40Hz (Lowered from 50Hz to be more sensitive to sub-bass)
+    float freq = 40.0f;
     float Q = 0.6f; // Slightly more damped
     float w0 = 2.0f * (float)M_PI * freq / rate;
     float alpha = sinf(w0) / (2.0f * Q);
