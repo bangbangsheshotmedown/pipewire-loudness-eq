@@ -4,7 +4,9 @@ This was vibe coded for myself, I'm not a beginer tho, works great.
 
 # Loudness Equalizer
 
-A program for PipeWire that keeps your volume at a steady level. It automatically brings up quiet voices and lowers loud explosions so you can hear everything clearly without constantly reaching for the volume knob.
+A lightweight program for PipeWire that keeps your volume at a steady level. It automatically brings up quiet voices and lowers loud explosions so you can hear everything clearly without constantly reaching for the volume knob.
+
+<img width="519" height="55" alt="image" src="https://github.com/user-attachments/assets/6c65c1c0-9b7c-458e-9bd6-b78d8b7e22d2" />
 
 ## Features
 
