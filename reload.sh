@@ -18,13 +18,7 @@ cleanup() {
     pkill -f loudness-eq 2>/dev/null
     
     # Unload the specific module
-    if [ -n "$MODULE_ID" ]; then
-        echo "Unloading virtual sink (ID: $MODULE_ID)..."
-        pactl unload-module "$MODULE_ID" 2>/dev/null
-    else
-        # Fallback: unload all null sinks with our name if ID was missed
-        pactl unload-module module-null-sink 2>/dev/null
-    fi
+    pactl unload-module module-null-sink 2>/dev/null
     
     exit 0
 }
@@ -34,22 +28,32 @@ trap cleanup SIGINT SIGTERM EXIT
 
 # 1. Save current default sink
 ORIGINAL_SINK=$(pactl get-default-sink 2>/dev/null)
+if [ -z "$ORIGINAL_SINK" ]; then
+    echo "Error: Could not determine current default sink."
+    exit 1
+fi
 echo "Physical Output: $ORIGINAL_SINK"
 
 # 2. Create Virtual Sink (Null Sink)
 echo "Creating Virtual Sink..."
-# Try to unload any existing ones first to be clean
 pactl unload-module module-null-sink 2>/dev/null
 
 MODULE_ID=$(pactl load-module module-null-sink \
     sink_name=$SINK_NAME \
-    sink_properties=device.description="$SINK_DESC")
+    sink_properties="device.description='$SINK_DESC'")
 
 if [ -z "$MODULE_ID" ]; then
     echo "Error: Could not create virtual sink."
     exit 1
 fi
 echo "Virtual Sink created with ID: $MODULE_ID"
+
+# Try to link volume using pw-metadata (may not work on all systems)
+NODE_ID=$(pw-dump Node | grep -B 20 "$SINK_NAME" | grep "id" | head -n 1 | awk '{print $2}' | tr -d ',')
+if [ -n "$NODE_ID" ]; then
+    echo "Linking volume for Node ID: $NODE_ID"
+    pw-metadata -n settings 0 "node.link-volume=$NODE_ID:true" 2>/dev/null
+fi
 
 # 3. Set it as default
 echo "Setting $SINK_NAME as default output..."
@@ -63,34 +67,37 @@ LOUD_PID=$!
 
 # 5. Wait for ports to appear
 echo "Waiting for ports..."
-for i in {1..20}; do
+for i in {1..50}; do
     if pw-link -o | grep -q "loudness-eq:output_FL"; then
         break
     fi
     sleep 0.1
 done
 
-if ! pw-link -o | grep -q "loudness-eq:output_FL"; then
-    echo "Error: loudness-eq ports did not appear."
-    cleanup
-fi
-
 # 6. Establish the Links
 echo "Establishing routing..."
 
-# Link Virtual Sink Monitor -> Filter Input
-# (The Null Sink has a monitor port that gives us the audio being played to it)
-pw-link "$SINK_NAME:monitor_FL" "loudness-eq:input_FL" 2>/dev/null
-pw-link "$SINK_NAME:monitor_FR" "loudness-eq:input_FR" 2>/dev/null
+# Find Physical Sink Ports
+PHYS_PORTS_L=$(pw-link -i | grep "$ORIGINAL_SINK" | grep -E "playback_FL|playback_0|playback.L" | head -n 1)
+PHYS_PORTS_R=$(pw-link -i | grep "$ORIGINAL_SINK" | grep -E "playback_FR|playback_1|playback.R" | head -n 1)
 
-# Link Filter Output -> Physical Speakers
-pw-link "loudness-eq:output_FL" "$ORIGINAL_SINK:playback_FL" 2>/dev/null
-pw-link "loudness-eq:output_FR" "$ORIGINAL_SINK:playback_FR" 2>/dev/null
+# Find Virtual Sink Monitor Ports
+VIRT_PORTS_L=$(pw-link -o | grep "$SINK_NAME" | grep -E "monitor_FL|monitor_0|monitor.L" | head -n 1)
+VIRT_PORTS_R=$(pw-link -o | grep "$SINK_NAME" | grep -E "monitor_FR|monitor_1|monitor.R" | head -n 1)
+
+echo "Linking $VIRT_PORTS_L -> loudness-eq:input_FL"
+pw-link "$VIRT_PORTS_L" "loudness-eq:input_FL"
+echo "Linking $VIRT_PORTS_R -> loudness-eq:input_FR"
+pw-link "$VIRT_PORTS_R" "loudness-eq:input_FR"
+
+echo "Linking loudness-eq:output_FL -> $PHYS_PORTS_L"
+pw-link "loudness-eq:output_FL" "$PHYS_PORTS_L"
+echo "Linking loudness-eq:output_FR -> $PHYS_PORTS_R"
+pw-link "loudness-eq:output_FR" "$PHYS_PORTS_R"
 
 echo "-------------------------------------------------------"
 echo "SYSTEM-WIDE LOUDNESS EQUALIZATION ACTIVE."
-echo "All audio is now being routed through the equalizer."
-echo "Settings: (Edit loudness.c or use env vars to tune)"
+echo "Routing: [Apps] -> $SINK_NAME -> [Equalizer] -> $ORIGINAL_SINK"
 echo "-------------------------------------------------------"
 
 # Stay alive to keep the plugin and sink active

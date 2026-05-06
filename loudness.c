@@ -5,36 +5,37 @@
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/latency-utils.h>
+#include <spa/param/props.h>
 #include <spa/pod/builder.h>
 
-// Long-term loudness target (~-12 dBFS)
-#define DEFAULT_TARGET   0.25f
+// Long-term loudness target (Windows-like: higher target ~-10 to -8 dBFS)
+#define DEFAULT_TARGET   0.30f
 
-// Gate: below this RMS level, hold current gain instead of boosting further.
-#define DEFAULT_GATE     0.001f   // ~-60 dBFS
+// Gate: below this RMS level, hold current gain instead of boosting further (Windows-style).
+#define DEFAULT_GATE     0.0005f   // ~-66 dBFS
 
-// Max gain cap (+30 dB)
-#define GAIN_MAX         32.0f
+// Max gain cap (+40 dB to really bring up the quiets)
+#define GAIN_MAX         100.0f
 
 // Limiter ceiling
-#define LIMITER_CEIL     0.95f
+#define LIMITER_CEIL     0.90f
 
 // RMS detector time constants.
-#define RMS_ATTACK_MS       3.0f    // very fast: catches loud peaks immediately
-#define RMS_RELEASE_MS   1500.0f    // faster recovery for quiet sounds
+#define RMS_ATTACK_MS       5.0f    // smooth energy detection
+#define RMS_RELEASE_MS    150.0f    // quick recovery
 
-#define GAIN_DOWN_MS       10.0f    // very fast: pull gain down quickly on loud content
-#define GAIN_UP_MS        400.0f    // faster: raise gain promptly on quiet content
+#define GAIN_DOWN_MS        5.0f    // Natural reduction (was 2ms, too fast for Windows-style)
+#define GAIN_UP_MS        400.0f    // Smooth boost (was 200ms)
 
 // Gain smoothing to prevent step artifacts
-#define GAIN_SMOOTH_MS   100.0f
+#define GAIN_SMOOTH_MS    60.0f
 
 // Look-ahead latency (ms)
-#define LOOKAHEAD_MS     10.0f
+#define LOOKAHEAD_MS     20.0f
 #define DELAY_BUF_SIZE   16384  // ~340ms at 48kHz, plenty for look-ahead
 
 // Limiter release time constant
-#define LIMITER_RELEASE_MS 500.0f
+#define LIMITER_RELEASE_MS  80.0f
 
 // Fletcher-Munson shelf EQ settings (Subtler to prevent "heaviness")
 #define FM_BASS_FREQ     80.0f    // Focus on sub-bass
@@ -80,8 +81,8 @@ static void k_weight_stage1_set(struct biquad *f, float rate) {
 }
 
 static void k_weight_stage2_set(struct biquad *f, float rate) {
-    // Stage 2: High-pass at 40Hz (Lowered from 50Hz to be more sensitive to sub-bass)
-    float freq = 40.0f;
+    // Stage 2: High-pass at 150Hz (Heavily reject fan noise and rumble for natural detection)
+    float freq = 150.0f;
     float Q = 0.6f; // Slightly more damped
     float w0 = 2.0f * (float)M_PI * freq / rate;
     float alpha = sinf(w0) / (2.0f * Q);
@@ -316,12 +317,24 @@ static void on_process(void *userdata, struct spa_io_position *position)
         // Scale factor: 1.0 at crest=3.0, down to 0.1 at crest=1.2
         float adapt = fmaxf(0.1f, fminf(1.0f, (crest - 1.2f) / 1.8f));
 
-        // Target gain based on weighted mids
+        // Target gain based on energy (RMS)
         float target_gain;
-        if (d->rms_env > d->gate)
-            target_gain = fminf(d->target / d->rms_env, GAIN_MAX);
-        else
-            target_gain = d->smooth_gain; // hold
+        float rms = d->rms_env;
+
+        if (rms > d->gate) {
+            float ideal_gain = d->target / rms;
+            
+            if (ideal_gain < 1.0f) {
+                // LOUD CONTENT: Partial attenuation (Ratio ~2.5:1)
+                target_gain = powf(ideal_gain, 0.6f);
+            } else {
+                // QUIET CONTENT: Full boost to target
+                target_gain = fminf(ideal_gain, GAIN_MAX);
+            }
+        } else {
+            // Silence/Very quiet: Hold current gain (Windows-style)
+            target_gain = d->smooth_gain;
+        }
 
         // Smooth the gain with adaptation
         float gain_c = (target_gain < d->smooth_gain) ? gain_down_c : gain_up_c;
@@ -429,7 +442,7 @@ int main(int argc, char *argv[]) {
         "Loudness Equalizer",
         pw_properties_new(
             PW_KEY_NODE_NAME,        "loudness-eq",
-            PW_KEY_NODE_DESCRIPTION, "Windows-like Loudness Equalization",
+            PW_KEY_NODE_DESCRIPTION, "Loudness Equalizer",
             PW_KEY_MEDIA_TYPE,       "Audio",
             PW_KEY_MEDIA_CATEGORY,   "Filter",
             PW_KEY_MEDIA_ROLE,       "DSP",
