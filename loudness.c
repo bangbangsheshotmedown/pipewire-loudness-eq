@@ -18,14 +18,14 @@
 #define GAIN_MAX         100.0f
 
 // Limiter ceiling
-#define LIMITER_CEIL     0.90f
+#define LIMITER_CEIL     0.89f
 
 // RMS detector time constants.
-#define RMS_ATTACK_MS       5.0f    // smooth energy detection
+#define RMS_ATTACK_MS       15.0f    // smooth energy detection
 #define RMS_RELEASE_MS    150.0f    // quick recovery
 
 #define GAIN_DOWN_MS        5.0f    // Natural reduction (was 2ms, too fast for Windows-style)
-#define GAIN_UP_MS        400.0f    // Smooth boost (was 200ms)
+#define GAIN_UP_MS        800.0f    // Smooth boost (was 200ms)
 
 // Gain smoothing to prevent step artifacts
 #define GAIN_SMOOTH_MS    60.0f
@@ -36,13 +36,6 @@
 
 // Limiter release time constant
 #define LIMITER_RELEASE_MS  80.0f
-
-// Fletcher-Munson shelf EQ settings (Subtler to prevent "heaviness")
-#define FM_BASS_FREQ     80.0f    // Focus on sub-bass
-#define FM_TREBLE_FREQ   7500.0f  // Focus on clarity
-#define FM_BASS_MAX_DB   3.0f     // Reduced from 6dB to prevent boominess
-#define FM_TREBLE_MAX_DB 5.0f
-#define FM_SHELF_SLOPE   0.6f     // Gentler slope
 
 // -----------------------------------------------------------------------------
 // Biquad — Direct Form II Transposed, stereo state
@@ -96,40 +89,6 @@ static void k_weight_stage2_set(struct biquad *f, float rate) {
     f->a2 = (1.0f - alpha) / a0;
 }
 
-static void low_shelf_set(struct biquad *f, float rate, float freq, float gain_db)
-{
-    float A    = powf(10.0f, gain_db / 40.0f);
-    float w0   = 2.0f * (float)M_PI * freq / rate;
-    float sw0  = sinf(w0);
-    float cw0  = cosf(w0);
-    float alph = sw0 / 2.0f * sqrtf((A + 1.0f/A) * (1.0f/FM_SHELF_SLOPE - 1.0f) + 2.0f);
-    float sqA2 = 2.0f * sqrtf(A) * alph;
-    float a0   = (A+1) + (A-1)*cw0 + sqA2;
-
-    f->b0 =  A * ((A+1) - (A-1)*cw0 + sqA2) / a0;
-    f->b1 =  2.0f*A * ((A-1) - (A+1)*cw0)   / a0;
-    f->b2 =  A * ((A+1) - (A-1)*cw0 - sqA2) / a0;
-    f->a1 = -2.0f   * ((A-1) + (A+1)*cw0)   / a0;
-    f->a2 =           ((A+1) + (A-1)*cw0 - sqA2) / a0;
-}
-
-static void high_shelf_set(struct biquad *f, float rate, float freq, float gain_db)
-{
-    float A    = powf(10.0f, gain_db / 40.0f);
-    float w0   = 2.0f * (float)M_PI * freq / rate;
-    float sw0  = sinf(w0);
-    float cw0  = cosf(w0);
-    float alph = sw0 / 2.0f * sqrtf((A + 1.0f/A) * (1.0f/FM_SHELF_SLOPE - 1.0f) + 2.0f);
-    float sqA2 = 2.0f * sqrtf(A) * alph;
-    float a0   = (A+1) - (A-1)*cw0 + sqA2;
-
-    f->b0 =  A * ((A+1) + (A-1)*cw0 + sqA2) / a0;
-    f->b1 = -2.0f*A * ((A-1) + (A+1)*cw0)   / a0;
-    f->b2 =  A * ((A+1) + (A-1)*cw0 - sqA2) / a0;
-    f->a1 =  2.0f   * ((A-1) - (A+1)*cw0)   / a0;
-    f->a2 =           ((A+1) - (A-1)*cw0 - sqA2) / a0;
-}
-
 static void peaking_set(struct biquad *f, float rate, float freq, float gain_db, float Q)
 {
     float A     = powf(10.0f, gain_db / 40.0f);
@@ -168,10 +127,6 @@ struct data {
 
     // Limiter: instant attack, slow release
     float limiter_gain;
-
-    // FM EQ
-    struct biquad bass_shelf;
-    struct biquad treble_shelf;
 
     // Sidechain Sensitivity Tweaks (400Hz and 1kHz)
     struct biquad sc_mid1;
@@ -263,20 +218,6 @@ static void on_process(void *userdata, struct spa_io_position *position)
         last_rate = rate;
     }
 
-    // Update FM EQ coefficients once per block.
-    // Amount is proportional to how much gain we're currently applying —
-    // more gain means quieter content, which needs more bass+treble.
-    {
-        float gain_db   = 20.0f * log10f(d->smooth_gain + 1e-6f);
-        float gain_norm = fmaxf(0.0f, fminf(1.0f,
-                            gain_db / (20.0f * log10f(GAIN_MAX))));
-
-        low_shelf_set (&d->bass_shelf,   rate, FM_BASS_FREQ,
-                       FM_BASS_MAX_DB   * gain_norm);
-        high_shelf_set(&d->treble_shelf, rate, FM_TREBLE_FREQ,
-                       FM_TREBLE_MAX_DB * gain_norm);
-    }
-
     float last_rms  = d->rms_env;
     float last_gain = d->smooth_gain;
 
@@ -326,14 +267,22 @@ static void on_process(void *userdata, struct spa_io_position *position)
             
             if (ideal_gain < 1.0f) {
                 // LOUD CONTENT: Partial attenuation (Ratio ~2.5:1)
-                target_gain = powf(ideal_gain, 0.6f);
+                //target_gain = powf(ideal_gain, 0.6f);
+                target_gain = powf(ideal_gain, 0.75f);
             } else {
                 // QUIET CONTENT: Full boost to target
                 target_gain = fminf(ideal_gain, GAIN_MAX);
             }
         } else {
-            // Silence/Very quiet: Hold current gain (Windows-style)
-            target_gain = d->smooth_gain;
+           // Silence/Very quiet: Hold current gain (Windows-style)
+           // target_gain = d->smooth_gain;
+           /* SILENCE: 
+	           Instead of jumping to 1.0, we "leak" back to 1.0 extremely slowly.
+	           This makes the transition invisible to the ear.
+	        */
+	        // TODO: 0.00001f if hissing
+	        float leak_rate = 0.0001f; // Adjust this to change how fast it decays
+	        target_gain = d->smooth_gain + leak_rate * (1.0f - d->smooth_gain);
         }
 
         // Smooth the gain with adaptation
@@ -353,12 +302,6 @@ static void on_process(void *userdata, struct spa_io_position *position)
         // 3. Apply leveling gain to PRESENT signal
         float el = sl * d->smooth_gain;
         float er = sr * d->smooth_gain;
-
-        // Fletcher-Munson psychoacoustic shelf EQ
-        el = biquad_tick(&d->bass_shelf,   el, 0);
-        er = biquad_tick(&d->bass_shelf,   er, 1);
-        el = biquad_tick(&d->treble_shelf, el, 0);
-        er = biquad_tick(&d->treble_shelf, er, 1);
 
         // Smoothed peak limiter: instant attack, ~500ms release
         float peak      = fmaxf(fabsf(el), fabsf(er));
